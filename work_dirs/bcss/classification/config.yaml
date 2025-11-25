@@ -13,11 +13,13 @@ model:
   fusion_dim: 512
   learnable_text_prompt: true
   prompt_init_scale: 0.02
+  prototype_init_mode: text_learnable
+  prototype_text_noise_std: 0.02
   text_prompts:
-  - Histopathology patch showing invasive tumor epithelium.
-  - Histopathology patch rich in fibrous stroma and connective tissue.
-  - Histopathology patch dominated by lymphocytes and immune cells.
-  - Histopathology patch with necrotic tissue and cellular debris.
+  - Tumor (TUM) regions consist of malignant epithelial cells characterized by pleomorphic, hyperchromatic nuclei, loss of glandular structure, and frequent mitotic figures, representing the core cancerous lesions in breast tissue.
+  - Stroma (STR) comprises the surrounding connective tissue, including fibroblasts and collagen fibers, often appearing as pink fibrous structures and sometimes showing desmoplastic reactions to tumor invasion.
+  - Lymphocyte (LYM) regions contain dense clusters of small immune cells with dark, round nuclei and minimal cytoplasm, reflecting the host immune response within the tumor microenvironment.
+  - Necrosis (NEC) represents areas of dead or dying tissue with pale, structureless eosinophilic regions, nuclear debris, and “ghost” cell remnants, typically associated with aggressive tumor growth and poor vascularization.
 dataset:
   name: bcss
   train_root: ./data/BCSS-WSSS/train
@@ -40,11 +42,19 @@ train:
   l3: 1.0
   l4: 1.0
   l5: 0.1
+  l_proto_text: 0.1
+  l_proto_temp: 0.07
   lambda_j: 0.50
   l_fuse: 1.0
   diversity:
     omega_window: 7
     omega_min_mass: 0.05
+    temperature: 0.07
+    sharpness_weight: 0.1
+    coverage_weight: 0.1
+    repulsion_weight: 0.5
+    repulsion_margin: 0.2
+    jeffreys_weight: 0.1
     debug: true
     debug_every: 500
   mask_adapter_alpha: 0.5

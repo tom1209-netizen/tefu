@@ -168,7 +168,7 @@ class TextGuidedCamFusion(nn.Module):
         # Learnable temperature for the attention logits
         self.logit_scale = nn.Parameter(torch.ones(1))
 
-    def forward(self, pooled_features, projected_prototypes):
+    def forward(self, pooled_features, projected_prototypes, return_text=False):
         """
         pooled_features: list of [B, C] pooled image features per level
         projected_prototypes: list of [P, C] projected prototypes per level
@@ -193,6 +193,8 @@ class TextGuidedCamFusion(nn.Module):
         logits = logits / math.sqrt(self.fusion_dim)
         logits = logits * torch.clamp(self.logit_scale, min=1e-4)
         weights = torch.softmax(logits, dim=-1)  # [B, num_classes, num_levels]
+        if return_text:
+            return weights, text_features
         return weights
 
 
@@ -208,8 +210,10 @@ class ClsNetwork(nn.Module):
         enable_text_fusion=True,
         text_prompts=None,
         fusion_dim=None,
-        learnable_text_prompt=False,
+        learnable_text_prompt=True,
         prompt_init_scale=0.02,
+        prototype_init_mode="text_learnable",  # ["random", "text_fixed", "text_learnable", "text_prompt_tuned"]
+        prototype_text_noise_std=0.02,
     ):
         super().__init__()
         self.cls_num_classes = cls_num_classes
@@ -256,6 +260,9 @@ class ClsNetwork(nn.Module):
         self.logit_scale4 = nn.parameter.Parameter(torch.ones([1]) * (1 / 0.07))
 
         self.text_fusion = None
+        self.prototype_init_mode = prototype_init_mode
+        self.prototype_text_noise_std = prototype_text_noise_std
+        self.prototype_initialized = prototype_init_mode == "random"
         if enable_text_fusion:
             fusion_dim_val = fusion_dim or prototype_feature_dim
             level_dims = [self.in_channels[idx] for idx in self.cam_fusion_levels]
@@ -283,7 +290,26 @@ class ClsNetwork(nn.Module):
                 regularized.append(param)
         return [{'params': regularized}, {'params': not_regularized, 'weight_decay': 0.}]
 
+    def init_prototypes_from_text(self, device):
+        if self.prototype_initialized or self.prototype_init_mode == "random":
+            return None
+        if self.text_fusion is None:
+            return None
+        with torch.no_grad():
+            text_feats = self.text_fusion.text_encoder(device)  # [C, D]
+            base = text_feats[:, None, :].repeat(1, self.num_prototypes_per_class, 1)
+            base = base.view(self.total_prototypes, -1)
+            if self.prototype_text_noise_std > 0:
+                noise = torch.randn_like(base) * self.prototype_text_noise_std
+                base = base + noise
+            self.prototypes.data = base.to(device)
+            if self.prototype_init_mode == "text_fixed":
+                self.prototypes.requires_grad_(False)
+            self.prototype_initialized = True
+        return text_feats
+
     def forward(self, x):
+        text_feats_init = self.init_prototypes_from_text(x.device)
         # Passes the input image through the SegFormer backbone to get multi-scale feature maps
         _x_all, _ = self.encoder(x) 
 
@@ -340,13 +366,15 @@ class ClsNetwork(nn.Module):
         feature_map_for_diversity = _x_all[3]
 
         cam_weights = None
+        text_features_out = text_feats_init
         if self.text_fusion is not None:
             pooled_feats = [
                 self.pooling(_x_all[idx], (1, 1)).flatten(1)
                 for idx in self.cam_fusion_levels
             ]
             proto_levels = [projected_p2, projected_p3, projected_p4]
-            cam_weights = self.text_fusion(pooled_feats, proto_levels)
+            fusion_out = self.text_fusion(pooled_feats, proto_levels, return_text=True)
+            cam_weights, text_features_out = fusion_out
 
         return (cls1, cam1, cls2, cam2, cls3, cam3, cls4, cam4, 
-                self.prototypes, self.k_list, feature_map_for_diversity, cam_weights)
+                self.prototypes, self.k_list, feature_map_for_diversity, cam_weights, projected_p4, text_features_out)

@@ -43,6 +43,8 @@ def build_model(cfg, checkpoint_path, device):
         fusion_dim=getattr(cfg.model, "fusion_dim", None),
         learnable_text_prompt=getattr(cfg.model, "learnable_text_prompt", False),
         prompt_init_scale=getattr(cfg.model, "prompt_init_scale", 0.02),
+        prototype_init_mode=getattr(cfg.model, "prototype_init_mode", "text_learnable"),
+        prototype_text_noise_std=getattr(cfg.model, "prototype_text_noise_std", 0.02),
     )
 
     checkpoint = torch.load(checkpoint_path, map_location=device)

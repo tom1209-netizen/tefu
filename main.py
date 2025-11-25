@@ -102,6 +102,8 @@ def build_model(cfg, device):
         fusion_dim=getattr(cfg.model, "fusion_dim", None),
         learnable_text_prompt=getattr(cfg.model, "learnable_text_prompt", False),
         prompt_init_scale=getattr(cfg.model, "prompt_init_scale", 0.02),
+        prototype_init_mode=getattr(cfg.model, "prototype_init_mode", "text_learnable"),
+        prototype_text_noise_std=getattr(cfg.model, "prototype_text_noise_std", 0.02),
     )
     return model.to(device)
 
@@ -154,6 +156,63 @@ def resume(args, model, optimizer, device):
     return start_iter, best_metric
 
 
+def compute_proto_text_contrast(feature_map, pseudo_mask, projected_p4, text_features, raw_prototypes, k_per_class, temp_img=0.07, temp_text=0.07):
+    """
+    Aligns image regions with prototypes and text to keep semantics anchored.
+    Returns summed loss (image-proto + proto-text) or None if unavailable.
+    """
+    if projected_p4 is None or text_features is None or raw_prototypes is None:
+        return None
+
+    B, C, H, W = feature_map.shape
+    device = feature_map.device
+
+    feats = feature_map.permute(0, 2, 3, 1).reshape(B, -1, C)  # [B, HW, C]
+    masks = pseudo_mask.view(B, -1)  # [B, HW]
+
+    # Prototype means in feature space
+    proto_feat = projected_p4.view(-1, k_per_class, projected_p4.shape[-1]).mean(dim=1)  # [classes, C]
+    proto_feat = F.normalize(proto_feat, dim=-1)
+
+    # Prototype means in proto/text space
+    proto_raw = raw_prototypes.view(-1, k_per_class, raw_prototypes.shape[-1]).mean(dim=1)  # [classes, D]
+    proto_raw = F.normalize(proto_raw, dim=-1)
+
+    text_features = F.normalize(text_features, dim=-1)  # [classes, D]
+
+    img_feats = []
+    targets = []
+    for b in range(B):
+        present = masks[b].unique()
+        for cls_idx in present:
+            cls_idx = int(cls_idx.item())
+            if cls_idx >= proto_feat.shape[0]:
+                continue
+            idxs = (masks[b] == cls_idx).nonzero(as_tuple=True)[0]
+            if idxs.numel() == 0:
+                continue
+            cls_feat = feats[b, idxs].mean(dim=0)
+            img_feats.append(cls_feat)
+            targets.append(cls_idx)
+
+    loss_parts = []
+    if img_feats:
+        img_feats = torch.stack(img_feats)  # [N, C]
+        targets_t = torch.tensor(targets, device=device, dtype=torch.long)
+        img_feats = F.normalize(img_feats, dim=-1)
+
+        logits_img_proto = (img_feats @ proto_feat.t()) / max(temp_img, 1e-4)
+        loss_parts.append(F.cross_entropy(logits_img_proto, targets_t))
+
+    logits_proto_text = (proto_raw @ text_features.t()) / max(temp_text, 1e-4)
+    targets_proto = torch.arange(proto_raw.shape[0], device=device)
+    loss_parts.append(F.cross_entropy(logits_proto_text, targets_proto))
+
+    if not loss_parts:
+        return None
+    return sum(loss_parts) / len(loss_parts)
+
+
 def build_loss_components(cfg, device):
     loss_function = nn.BCEWithLogitsLoss().to(device)
     mask_adapter = MaskAdapter_DynamicThreshold(alpha=cfg.train.mask_adapter_alpha)
@@ -176,6 +235,8 @@ def build_loss_components(cfg, device):
         debug_every=(div_cfg.debug_every if div_cfg and "debug_every" in div_cfg else 200),
     ).to(device)
     lambda_fuse = getattr(cfg.train, "l_fuse", 1.0)
+    lambda_proto_text = getattr(cfg.train, "l_proto_text", 0.0)
+    proto_text_temp = getattr(cfg.train, "l_proto_temp", 0.07)
 
     return {
         "cls": loss_function,
@@ -184,6 +245,8 @@ def build_loss_components(cfg, device):
         "bg": bg_loss_fn,
         "diversity": diversity_loss_fn,
         "lambda_fuse": lambda_fuse,
+        "lambda_proto_text": lambda_proto_text,
+        "proto_text_temp": proto_text_temp,
     }
 
 
@@ -238,6 +301,8 @@ def train(cfg, args):
     bg_loss_fn = losses["bg"]
     diversity_loss_fn = losses["diversity"]
     lambda_fuse = losses["lambda_fuse"]
+    lambda_proto_text = losses["lambda_proto_text"]
+    proto_text_temp = losses["proto_text_temp"]
 
     scaler = torch.cuda.amp.GradScaler()
     model.train()
@@ -259,7 +324,7 @@ def train(cfg, args):
         iter_diversity_loss = None
 
         with torch.cuda.amp.autocast():
-            (cls1, cam1, cls2, cam2, cls3, cam3, cls4, cam4, l_fea, k_list, feature_map_for_diversity, cam_weights) = model(inputs)
+            (cls1, cam1, cls2, cam2, cls3, cam3, cls4, cam4, l_fea, k_list, feature_map_for_diversity, cam_weights, projected_p4, text_features_out) = model(inputs)
 
             cls1_merge = merge_to_parent_predictions(cls1, k_list, method=cfg.train.merge_train)
             cls2_merge = merge_to_parent_predictions(cls2, k_list, method=cfg.train.merge_train)
@@ -312,9 +377,24 @@ def train(cfg, args):
                 iter_diversity_loss = diversity_loss.detach().item()
                 diversity_running_avg = monitor_diversity_loss(diversity_meter, diversity_loss)
 
+                proto_text_loss = None
+                if lambda_proto_text > 0:
+                    proto_text_loss = compute_proto_text_contrast(
+                        feature_map_for_diversity,
+                        pseudo_mask_resized,
+                        projected_p4,
+                        text_features_out,
+                        l_fea,
+                        cfg.model.num_prototypes_per_class,
+                        temp_img=proto_text_temp,
+                        temp_text=proto_text_temp,
+                    )
+
                 lambda_sim = cfg.train.l5
                 lambda_j = cfg.train.lambda_j
                 loss = cls_loss + lambda_j * diversity_loss
+                if proto_text_loss is not None:
+                    loss = loss + lambda_proto_text * proto_text_loss
                 if contrastive_loss is not None:
                     loss = loss + lambda_sim * (contrastive_loss + 0.0005 * torch.mean(cam4))
             else:

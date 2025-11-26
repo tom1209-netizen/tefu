@@ -89,7 +89,10 @@ def validate(model=None, data_loader=None, cfg=None, cls_loss_func=None):
             cls_label = cls_label.cuda().float()
 
             outputs = model(inputs)
-            cls1, _, _, _, _, _, cls4, _, _, k_list, _, cam_weights = outputs[:12]
+            cls1 = outputs[0]
+            cls4 = outputs[6]
+            k_list = outputs[9]
+            cam_weights = outputs[11] if len(outputs) > 11 else None
             cls1 = merge_to_parent_predictions(cls1, k_list, method=cfg.train.merge_test)
             cls4 = merge_to_parent_predictions(cls4, k_list, method=cfg.train.merge_test)
             cls_loss = cls_loss_func(cls1, cls_label)
@@ -102,7 +105,11 @@ def validate(model=None, data_loader=None, cfg=None, cls_loss_func=None):
             for tta_trans in tta_transform:
                 augmented_tensor = tta_trans.augment_image(inputs)
                 tta_outputs = model(augmented_tensor)
-                _, _, _, cam2, _, cam3, _, cam4, _, k_list, _, cam_weights = tta_outputs[:12]
+                cam2 = tta_outputs[3]
+                cam3 = tta_outputs[5]
+                cam4 = tta_outputs[7]
+                k_list = tta_outputs[9]
+                cam_weights = tta_outputs[11] if len(tta_outputs) > 11 else None
 
                 cam2 = merge_subclass_cams_to_parent(cam2, k_list, method=cfg.train.merge_test)
                 cam3 = merge_subclass_cams_to_parent(cam3, k_list, method=cfg.train.merge_test)
@@ -176,7 +183,12 @@ def generate_cam(model=None, data_loader=None, cfg=None, cls_loss_func=None):
             cls_label = cls_label.cuda().float()
 
             outputs = model(inputs)
-            cls1, cam1, cls2, cam2, cls3, cam3, cls4, cam4, l_fea, k_list, _, cam_weights = outputs[:12]
+            cam1 = outputs[1]
+            cam2 = outputs[3]
+            cam3 = outputs[5]
+            cam4 = outputs[7]
+            k_list = outputs[9]
+            cam_weights = outputs[11] if len(outputs) > 11 else None
 
             cam1 = merge_subclass_cams_to_parent(cam1, k_list, method=cfg.train.merge_test)
             cam2 = merge_subclass_cams_to_parent(cam2, k_list, method=cfg.train.merge_test)

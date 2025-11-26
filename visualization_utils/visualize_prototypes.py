@@ -154,7 +154,11 @@ def predict_mask(model, image_tensor, cls_label, cfg, palette):
     """
     with torch.no_grad():
         outputs = model(image_tensor)
-        (_, cam1, _, cam2, _, cam3, _, cam4, _, k_list, _, cam_weights) = outputs
+        cam2 = outputs[3]
+        cam3 = outputs[5]
+        cam4 = outputs[7]
+        k_list = outputs[9]
+        cam_weights = outputs[11] if len(outputs) > 11 else None
 
         merge_method = getattr(cfg.train, "merge_test", "max")
         cam2 = merge_subclass_cams_to_parent(cam2, k_list, method=merge_method)

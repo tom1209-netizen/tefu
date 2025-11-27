@@ -104,6 +104,9 @@ def build_model(cfg, device):
         prompt_init_scale=getattr(cfg.model, "prompt_init_scale", 0.02),
         prototype_init_mode=getattr(cfg.model, "prototype_init_mode", "text_learnable"),
         prototype_text_noise_std=getattr(cfg.model, "prototype_text_noise_std", 0.02),
+        use_ctx_prompt=getattr(cfg.model, "use_ctx_prompt", False),
+        ctx_prompt_len=getattr(cfg.model, "ctx_prompt_len", 8),
+        ctx_class_specific=getattr(cfg.model, "ctx_class_specific", False),
     )
     return model.to(device)
 

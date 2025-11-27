@@ -11,9 +11,6 @@ from medclip import MedCLIPModel, MedCLIPVisionModelViT, MedCLIPProcessor
 
 from model.segform import mix_transformer
 
-# A simple MLP to project prototype features to the correct dimension.
-# This is still required to map the single set of learnable prototypes
-# to the different feature dimensions of the four backbone scales.
 class AdaptiveLayer(nn.Module):
     def __init__(self, in_dim, n_ratio, out_dim):
         super().__init__()
@@ -53,19 +50,27 @@ class TextPromptEncoder(nn.Module):
         projection_dim=512,
         learnable_prompt=False,
         prompt_init_scale=0.02,
+        use_ctx_prompt=False,
+        ctx_prompt_len=8,
+        ctx_class_specific=False,
     ):
         super().__init__()
         self.processor = MedCLIPProcessor()
         self.text_model = MedCLIPModel(vision_cls=MedCLIPVisionModelViT).text_model
-        # Ensure the underlying BERT returns hidden states for pooling
         if hasattr(self.text_model.model, "config"):
             self.text_model.model.config.output_hidden_states = True
-        # We keep the language encoder frozen for stability
         self.text_model.requires_grad_(False)
         self.text_model.eval()
         self.learnable_prompt = learnable_prompt
 
+        # Soft-prompt settings (CoOp)
+        self.use_ctx_prompt = use_ctx_prompt and ctx_prompt_len > 0
+        self.n_ctx = ctx_prompt_len
+        self.ctx_class_specific = ctx_class_specific
+
+        # Tokenize the provided or default prompts
         prompts = prompts or self._build_default_prompts(cls_num_classes)
+
         # OmegaConf ListConfig or other iterables need to be cast to a plain list of strings
         if not isinstance(prompts, (list, tuple)):
             prompts = [prompts]
@@ -79,26 +84,36 @@ class TextPromptEncoder(nn.Module):
         self.register_buffer("prompt_input_ids", tokenized["input_ids"], persistent=False)
         self.register_buffer("prompt_attention_mask", tokenized["attention_mask"], persistent=False)
 
+        # Small projection head after MedCLIP text projection
         text_width = self.text_model.projection_head.out_features
         self.text_proj = nn.Sequential(
             nn.Linear(text_width, projection_dim),
             nn.ReLU(),
             nn.LayerNorm(projection_dim)
         )
+
+        # Additive delta on text embeddings
         self.prompt_delta = None
         if learnable_prompt:
             delta = torch.zeros(cls_num_classes, text_width)
             nn.init.trunc_normal_(delta, std=prompt_init_scale)
             self.prompt_delta = nn.Parameter(delta)
 
-        with torch.no_grad():
-            text_embeds = self.text_model(
-                input_ids=self.prompt_input_ids,
-                attention_mask=self.prompt_attention_mask
-            )
-            text_embeds = self.text_proj(text_embeds)
-            text_embeds = F.normalize(text_embeds, dim=-1)
-        self.register_buffer("text_embedding", text_embeds, persistent=False)
+        # Learnable context tokens (inserted after CLS)
+        self.ctx = None
+        if self.use_ctx_prompt:
+            hidden_size = self.text_model.model.config.hidden_size
+            ctx_shape = (cls_num_classes if ctx_class_specific else 1, self.n_ctx, hidden_size)
+            ctx = torch.zeros(ctx_shape)
+            nn.init.trunc_normal_(ctx, std=prompt_init_scale)
+            self.ctx = nn.Parameter(ctx)
+
+        # Cache frozen embeddings when not using soft prompts
+        self.register_buffer("text_embedding", None, persistent=False)
+        if not self.use_ctx_prompt:
+            with torch.no_grad():
+                text_embeds = self._encode_text(self.prompt_input_ids, self.prompt_attention_mask)
+                self.text_embedding = text_embeds
 
     @staticmethod
     def _build_default_prompts(cls_num_classes):
@@ -110,20 +125,61 @@ class TextPromptEncoder(nn.Module):
         ]
         if cls_num_classes <= len(base_prompts):
             return base_prompts[:cls_num_classes]
+        
         # Extend with generic prompts if more classes are present
         for idx in range(len(base_prompts), cls_num_classes):
             base_prompts.append(f"Histopathology patch for class {idx}.")
         return base_prompts
 
+    def _encode_text(self, input_ids, attention_mask, input_embeds=None):
+        # Run frozen MedCLIP text model, pool layers, project, normalize
+        outputs = self.text_model.model(
+            input_ids=input_ids if input_embeds is None else None,
+            inputs_embeds=input_embeds,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+        )
+        hidden_states = outputs["hidden_states"]
+        pooled = torch.stack([hidden_states[1], hidden_states[2], hidden_states[-1]]).permute(1, 0, 2, 3)
+        pooled = pooled.mean(2).mean(1)  # [B, hidden]
+        pooled = self.text_model.projection_head(pooled)
+        pooled = self.text_proj(pooled)
+        return F.normalize(pooled, dim=-1)
+
     def forward(self, device):
-        if hasattr(self, "text_embedding") and self.text_embedding is not None:
-            base = self.text_embedding.to(device)
-        else:
+        if self.use_ctx_prompt:
+            # Build token embeddings with inserted context tokens
             input_ids = self.prompt_input_ids.to(device)
             attention_mask = self.prompt_attention_mask.to(device)
+
             with torch.no_grad():
-                base = self.text_model(input_ids=input_ids, attention_mask=attention_mask)
-            base = self.text_proj(base)
+                token_embeds = self.text_model.model.embeddings.word_embeddings(input_ids)
+
+            ctx = self.ctx
+            if ctx is not None:
+                if ctx.shape[0] == 1 and input_ids.shape[0] > 1:
+                    ctx = ctx.expand(input_ids.shape[0], -1, -1)
+                ctx = ctx.to(device)
+            else:
+                ctx = None
+
+            if ctx is not None:
+                token_embeds = torch.cat([token_embeds[:, :1, :], ctx, token_embeds[:, 1:, :]], dim=1)
+                ctx_mask = torch.ones(input_ids.shape[0], self.n_ctx, device=device, dtype=attention_mask.dtype)
+                attention_mask = torch.cat([attention_mask[:, :1], ctx_mask, attention_mask[:, 1:]], dim=1)
+
+            base = self._encode_text(None, attention_mask, input_embeds=token_embeds)
+        else:
+            # Reuse cached embeddings or encode once (no soft prompts)
+            if self.text_embedding is not None:
+                base = self.text_embedding.to(device)
+            else:
+                input_ids = self.prompt_input_ids.to(device)
+                attention_mask = self.prompt_attention_mask.to(device)
+                with torch.no_grad():
+                    base = self._encode_text(input_ids, attention_mask)
+
+        # Additive delta on top
         if self.prompt_delta is not None:
             base = base + self.prompt_delta.to(device)
         return F.normalize(base, dim=-1)
@@ -143,6 +199,9 @@ class TextGuidedCamFusion(nn.Module):
         prompts=None,
         learnable_prompt=False,
         prompt_init_scale=0.02,
+        use_ctx_prompt=False,
+        ctx_prompt_len=8,
+        ctx_class_specific=False,
     ):
         super().__init__()
         self.cls_num_classes = cls_num_classes
@@ -154,6 +213,9 @@ class TextGuidedCamFusion(nn.Module):
             projection_dim=self.fusion_dim,
             learnable_prompt=learnable_prompt,
             prompt_init_scale=prompt_init_scale,
+            use_ctx_prompt=use_ctx_prompt,
+            ctx_prompt_len=ctx_prompt_len,
+            ctx_class_specific=ctx_class_specific,
         )
 
         # Project concatenated image feature + prototype context to fusion_dim
@@ -214,6 +276,9 @@ class ClsNetwork(nn.Module):
         prompt_init_scale=0.02,
         prototype_init_mode="text_learnable",  # ["random", "text_fixed", "text_learnable", "text_prompt_tuned"]
         prototype_text_noise_std=0.02,
+        use_ctx_prompt=False,
+        ctx_prompt_len=8,
+        ctx_class_specific=False,
     ):
         super().__init__()
         self.cls_num_classes = cls_num_classes
@@ -274,6 +339,9 @@ class ClsNetwork(nn.Module):
                 prompts=text_prompts,
                 learnable_prompt=learnable_text_prompt,
                 prompt_init_scale=prompt_init_scale,
+                use_ctx_prompt=use_ctx_prompt,
+                ctx_prompt_len=ctx_prompt_len,
+                ctx_class_specific=ctx_class_specific,
             )
 
 

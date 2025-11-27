@@ -159,6 +159,8 @@ class TextPromptEncoder(nn.Module):
             if ctx is not None:
                 if ctx.shape[0] == 1 and input_ids.shape[0] > 1:
                     ctx = ctx.expand(input_ids.shape[0], -1, -1)
+                elif ctx.shape[0] != input_ids.shape[0]:
+                    ctx = ctx[:1].expand(input_ids.shape[0], -1, -1)
                 ctx = ctx.to(device)
             else:
                 ctx = None

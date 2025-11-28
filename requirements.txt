@@ -28,7 +28,7 @@ packaging>=23.0  # For version checking
 ttach==0.0.3
 
 # Medical Image Processing
-MedCLIP==0.0.3
+conch @ git+https://github.com/mahmoodlab/CONCH.git
 
 # Data Processing
 pandas==2.2.1

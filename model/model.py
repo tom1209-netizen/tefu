@@ -1,15 +1,15 @@
 import math
 import pickle as pkl
 from functools import partial
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from timm.models.layers import trunc_normal_
 
-from medclip import MedCLIPModel, MedCLIPVisionModelViT, MedCLIPProcessor
-
 from model.segform import mix_transformer
+from model.conch_adapter import ConchAdapter
 
 class AdaptiveLayer(nn.Module):
     def __init__(self, in_dim, n_ratio, out_dim):
@@ -45,75 +45,46 @@ class TextPromptEncoder(nn.Module):
     """
     def __init__(
         self,
-        cls_num_classes,
-        prompts=None,
-        projection_dim=512,
-        learnable_prompt=False,
-        prompt_init_scale=0.02,
-        use_ctx_prompt=False,
-        ctx_prompt_len=8,
-        ctx_class_specific=False,
+        cls_num_classes: int,
+        prompts: Optional[Union[List[str], str]],
+        clip_adapter: ConchAdapter,
+        projection_dim: Optional[int] = None,
+        learnable_prompt: bool = False,
+        prompt_init_scale: float = 0.02,
+        use_ctx_prompt: bool = False,
+        ctx_prompt_len: int = 8,
+        ctx_class_specific: bool = False,
     ):
         super().__init__()
-        self.processor = MedCLIPProcessor()
-        self.text_model = MedCLIPModel(vision_cls=MedCLIPVisionModelViT).text_model
-        if hasattr(self.text_model.model, "config"):
-            self.text_model.model.config.output_hidden_states = True
-        self.text_model.requires_grad_(False)
-        self.text_model.eval()
+        self.clip_adapter = clip_adapter
         self.learnable_prompt = learnable_prompt
-
-        # Soft-prompt settings (CoOp)
-        self.use_ctx_prompt = use_ctx_prompt and ctx_prompt_len > 0
+        self.use_ctx_prompt = False  # Context prompts are not wired for CONCH text yet.
         self.n_ctx = ctx_prompt_len
         self.ctx_class_specific = ctx_class_specific
 
-        # Tokenize the provided or default prompts
         prompts = prompts or self._build_default_prompts(cls_num_classes)
-
-        # OmegaConf ListConfig or other iterables need to be cast to a plain list of strings
         if not isinstance(prompts, (list, tuple)):
             prompts = [prompts]
         prompts = [str(p) for p in prompts]
-        tokenized = self.processor(
-            text=prompts,
-            padding=True,
-            truncation=True,
-            return_tensors="pt"
-        )
-        self.register_buffer("prompt_input_ids", tokenized["input_ids"], persistent=False)
-        self.register_buffer("prompt_attention_mask", tokenized["attention_mask"], persistent=False)
+        self.prompts = prompts
+        self.register_buffer("prompt_token_ids", clip_adapter.tokenize(prompts), persistent=False)
 
-        # Small projection head after MedCLIP text projection
-        text_width = self.text_model.projection_head.out_features
-        self.text_proj = nn.Sequential(
-            nn.Linear(text_width, projection_dim),
-            nn.ReLU(),
-            nn.LayerNorm(projection_dim)
-        )
+        self.text_dim = clip_adapter.embed_dim
+        proj_dim = projection_dim or self.text_dim
+        if proj_dim != self.text_dim:
+            self.text_proj = nn.Sequential(
+                nn.Linear(self.text_dim, proj_dim),
+                nn.ReLU(),
+                nn.LayerNorm(proj_dim),
+            )
+        else:
+            self.text_proj = nn.Identity()
 
-        # Additive delta on text embeddings
         self.prompt_delta = None
         if learnable_prompt:
-            delta = torch.zeros(cls_num_classes, text_width)
+            delta = torch.zeros(cls_num_classes, proj_dim)
             nn.init.trunc_normal_(delta, std=prompt_init_scale)
             self.prompt_delta = nn.Parameter(delta)
-
-        # Learnable context tokens (inserted after CLS)
-        self.ctx = None
-        if self.use_ctx_prompt:
-            hidden_size = self.text_model.model.config.hidden_size
-            ctx_shape = (cls_num_classes if ctx_class_specific else 1, self.n_ctx, hidden_size)
-            ctx = torch.zeros(ctx_shape)
-            nn.init.trunc_normal_(ctx, std=prompt_init_scale)
-            self.ctx = nn.Parameter(ctx)
-
-        # Cache frozen embeddings when not using soft prompts
-        self.register_buffer("text_embedding", None, persistent=False)
-        if not self.use_ctx_prompt:
-            with torch.no_grad():
-                text_embeds = self._encode_text(self.prompt_input_ids, self.prompt_attention_mask)
-                self.text_embedding = text_embeds
 
     @staticmethod
     def _build_default_prompts(cls_num_classes):
@@ -121,67 +92,19 @@ class TextPromptEncoder(nn.Module):
             "Histopathology patch showing invasive tumor epithelium.",
             "Histopathology patch rich in fibrous stroma and connective tissue.",
             "Histopathology patch dominated by lymphocytes and immune cells.",
-            "Histopathology patch with necrotic tissue and cellular debris."
+            "Histopathology patch with necrotic tissue and cellular debris.",
         ]
         if cls_num_classes <= len(base_prompts):
             return base_prompts[:cls_num_classes]
-        
-        # Extend with generic prompts if more classes are present
+
         for idx in range(len(base_prompts), cls_num_classes):
             base_prompts.append(f"Histopathology patch for class {idx}.")
         return base_prompts
 
-    def _encode_text(self, input_ids, attention_mask, input_embeds=None):
-        # Run frozen MedCLIP text model, pool layers, project, normalize
-        outputs = self.text_model.model(
-            input_ids=input_ids if input_embeds is None else None,
-            inputs_embeds=input_embeds,
-            attention_mask=attention_mask,
-            output_hidden_states=True,
-        )
-        hidden_states = outputs["hidden_states"]
-        pooled = torch.stack([hidden_states[1], hidden_states[2], hidden_states[-1]]).permute(1, 0, 2, 3)
-        pooled = pooled.mean(2).mean(1)  # [B, hidden]
-        pooled = self.text_model.projection_head(pooled)
-        pooled = self.text_proj(pooled)
-        return F.normalize(pooled, dim=-1)
-
     def forward(self, device):
-        if self.use_ctx_prompt:
-            # Build token embeddings with inserted context tokens
-            input_ids = self.prompt_input_ids.to(device)
-            attention_mask = self.prompt_attention_mask.to(device)
-
-            with torch.no_grad():
-                token_embeds = self.text_model.model.embeddings.word_embeddings(input_ids)
-
-            ctx = self.ctx
-            if ctx is not None:
-                if ctx.shape[0] == 1 and input_ids.shape[0] > 1:
-                    ctx = ctx.expand(input_ids.shape[0], -1, -1)
-                elif ctx.shape[0] != input_ids.shape[0]:
-                    ctx = ctx[:1].expand(input_ids.shape[0], -1, -1)
-                ctx = ctx.to(device)
-            else:
-                ctx = None
-
-            if ctx is not None:
-                token_embeds = torch.cat([token_embeds[:, :1, :], ctx, token_embeds[:, 1:, :]], dim=1)
-                ctx_mask = torch.ones(input_ids.shape[0], self.n_ctx, device=device, dtype=attention_mask.dtype)
-                attention_mask = torch.cat([attention_mask[:, :1], ctx_mask, attention_mask[:, 1:]], dim=1)
-
-            base = self._encode_text(None, attention_mask, input_embeds=token_embeds)
-        else:
-            # Reuse cached embeddings or encode once (no soft prompts)
-            if self.text_embedding is not None:
-                base = self.text_embedding.to(device)
-            else:
-                input_ids = self.prompt_input_ids.to(device)
-                attention_mask = self.prompt_attention_mask.to(device)
-                with torch.no_grad():
-                    base = self._encode_text(input_ids, attention_mask)
-
-        # Additive delta on top
+        token_ids = self.prompt_token_ids.to(device)
+        base = self.clip_adapter.encode_text_tokens(token_ids, normalize=True)
+        base = self.text_proj(base)
         if self.prompt_delta is not None:
             base = base + self.prompt_delta.to(device)
         return F.normalize(base, dim=-1)
@@ -197,6 +120,7 @@ class TextGuidedCamFusion(nn.Module):
         cls_num_classes,
         level_dims,
         prototype_feature_dim,
+        clip_adapter: ConchAdapter,
         fusion_dim=None,
         prompts=None,
         learnable_prompt=False,
@@ -213,6 +137,7 @@ class TextGuidedCamFusion(nn.Module):
             cls_num_classes=cls_num_classes,
             prompts=prompts,
             projection_dim=self.fusion_dim,
+            clip_adapter=clip_adapter,
             learnable_prompt=learnable_prompt,
             prompt_init_scale=prompt_init_scale,
             use_ctx_prompt=use_ctx_prompt,
@@ -268,6 +193,7 @@ class ClsNetwork(nn.Module):
         cls_num_classes=4,
         num_prototypes_per_class=10,
         prototype_feature_dim=512,
+        clip_adapter: Optional[ConchAdapter] = None,
         stride=[4, 2, 2, 1],
         pretrained=True,
         n_ratio=0.5,
@@ -288,30 +214,44 @@ class ClsNetwork(nn.Module):
         self.total_prototypes = cls_num_classes * num_prototypes_per_class
         self.stride = stride
         self.cam_fusion_levels = (1, 2, 3)  # use scales 2,3,4 for fusion
+        self.clip_adapter = clip_adapter
 
-        # Backbone Encoder (Same as original)
-        self.encoder = getattr(mix_transformer, backbone)(stride=self.stride)
-        self.in_channels = self.encoder.embed_dims
+        # Align prototype dimensionality with CONCH embedding space when provided
+        if self.clip_adapter is not None:
+            prototype_feature_dim = self.clip_adapter.embed_dim
+        self.prototype_feature_dim = prototype_feature_dim
 
-        # Loads pre-trained weights for the backbone (Same as original)
-        if pretrained:
-            state_dict = torch.load('./pretrained/'+backbone+'.pth', map_location="cpu")
-            state_dict.pop('head.weight', None)
-            state_dict.pop('head.bias', None)
-            state_dict = {k: v for k, v in state_dict.items() if k in self.encoder.state_dict().keys()}
-            self.encoder.load_state_dict(state_dict, strict=False)
+        # Backbone Encoder
+        self.use_clip_visual = backbone.startswith("conch")
+        if self.use_clip_visual and self.clip_adapter is None:
+            raise ValueError("Backbone set to CONCH but clip_adapter is missing.")
+        self.encoder = None
+        if self.use_clip_visual:
+            # Use CONCH visual features directly; create a placeholder channel layout
+            self.in_channels = [self.prototype_feature_dim] * 4
+        else:
+            self.encoder = getattr(mix_transformer, backbone)(stride=self.stride)
+            self.in_channels = self.encoder.embed_dims
+
+            # Loads pre-trained weights for the backbone (Same as original)
+            if pretrained:
+                state_dict = torch.load('./pretrained/'+backbone+'.pth', map_location="cpu")
+                state_dict.pop('head.weight', None)
+                state_dict.pop('head.bias', None)
+                state_dict = {k: v for k, v in state_dict.items() if k in self.encoder.state_dict().keys()}
+                self.encoder.load_state_dict(state_dict, strict=False)
 
         # Learnable Prototypes 
         # Instead of loading from a file, we create prototypes as a learnable parameter
         # The optimizer will update these vectors during training
-        self.prototypes = nn.Parameter(torch.randn(self.total_prototypes, prototype_feature_dim), requires_grad=True)
+        self.prototypes = nn.Parameter(torch.randn(self.total_prototypes, self.prototype_feature_dim), requires_grad=True)
 
         # Adaptive Layers to Project Prototypes 
         # These now project the learnable prototypes to match each of the four feature scales
-        self.l_fc1 = AdaptiveLayer(prototype_feature_dim, n_ratio, self.in_channels[0])
-        self.l_fc2 = AdaptiveLayer(prototype_feature_dim, n_ratio, self.in_channels[1])
-        self.l_fc3 = AdaptiveLayer(prototype_feature_dim, n_ratio, self.in_channels[2])
-        self.l_fc4 = AdaptiveLayer(prototype_feature_dim, n_ratio, self.in_channels[3])
+        self.l_fc1 = AdaptiveLayer(self.prototype_feature_dim, n_ratio, self.in_channels[0])
+        self.l_fc2 = AdaptiveLayer(self.prototype_feature_dim, n_ratio, self.in_channels[1])
+        self.l_fc3 = AdaptiveLayer(self.prototype_feature_dim, n_ratio, self.in_channels[2])
+        self.l_fc4 = AdaptiveLayer(self.prototype_feature_dim, n_ratio, self.in_channels[3])
 
         # Other components from the original model are kept for compatibility
         self.pooling = F.adaptive_avg_pool2d
@@ -331,12 +271,13 @@ class ClsNetwork(nn.Module):
         self.prototype_text_noise_std = prototype_text_noise_std
         self.prototype_initialized = prototype_init_mode == "random"
         if enable_text_fusion:
-            fusion_dim_val = fusion_dim or prototype_feature_dim
+            fusion_dim_val = fusion_dim or self.prototype_feature_dim
             level_dims = [self.in_channels[idx] for idx in self.cam_fusion_levels]
             self.text_fusion = TextGuidedCamFusion(
                 cls_num_classes=cls_num_classes,
                 level_dims=level_dims,
-                prototype_feature_dim=prototype_feature_dim,
+                prototype_feature_dim=self.prototype_feature_dim,
+                clip_adapter=self.clip_adapter,
                 fusion_dim=fusion_dim_val,
                 prompts=text_prompts,
                 learnable_prompt=learnable_text_prompt,
@@ -380,12 +321,17 @@ class ClsNetwork(nn.Module):
 
     def forward(self, x):
         text_feats_init = self.init_prototypes_from_text(x.device)
-        # Passes the input image through the SegFormer backbone to get multi-scale feature maps
-        _x_all, _ = self.encoder(x) 
+        # Extract multi-scale feature maps
+        if self.use_clip_visual:
+            _x_all = self.clip_adapter.visual_intermediates(x)
+            if not _x_all:
+                raise RuntimeError("CONCH visual encoder did not return any feature maps.")
+            while len(_x_all) < 4:
+                _x_all.append(F.avg_pool2d(_x_all[-1], kernel_size=2, stride=2))
+        else:
+            _x_all, _ = self.encoder(x)
 
         imshapes = [f.shape for f in _x_all]
-        
-        # Flattens the feature maps from [B, C, H, W] to [B*H*W, C] for matching
         image_features = [f.permute(0, 2, 3, 1).reshape(-1, f.shape[1]) for f in _x_all]
         _x1, _x2, _x3, _x4 = image_features
     

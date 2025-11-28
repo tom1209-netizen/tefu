@@ -11,8 +11,8 @@ import torch.nn.functional as F
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 
-from medclip import MedCLIPModel, MedCLIPVisionModelViT
 from model.model import ClsNetwork
+from model.conch_adapter import ConchAdapter
 from utils.contrast_loss import InfoNCELossBG, InfoNCELossFG
 from utils.diversity_loss import PrototypeDiversityRegularizer
 from utils.fgbg_feature import FeatureExtractor, MaskAdapter_DynamicThreshold
@@ -24,7 +24,7 @@ from utils.hierarchical_utils import (
 )
 from utils.optimizer import PolyWarmupAdamW
 from utils.pyutils import AverageMeter, set_seed
-from utils.trainutils import get_cls_dataset
+from utils.trainutils import get_cls_dataset, get_mean_std
 from utils.validate import generate_cam, validate
 
 
@@ -59,10 +59,31 @@ def get_device(gpu_id: int):
     return torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
 
 
-def build_clip_model(device):
-    clip_model = MedCLIPModel(vision_cls=MedCLIPVisionModelViT)
-    clip_model = clip_model.to(device)
-    clip_model.eval()
+def build_clip_model(cfg, device):
+    clip_cfg = getattr(cfg, "clip", None)
+    clip_cfg = OmegaConf.to_container(clip_cfg, resolve=True) if clip_cfg is not None else {}
+
+    model_name = clip_cfg.get("model_name", "conch_ViT-B-16")
+    checkpoint_path = clip_cfg.get("checkpoint_path")
+    cache_dir = clip_cfg.get("cache_dir")
+    hf_hub = clip_cfg.get("hf_hub")
+    hf_token = clip_cfg.get("hf_token")
+    force_image_size = clip_cfg.get("force_image_size")
+    proj_contrast = clip_cfg.get("proj_contrast", False)
+    freeze = clip_cfg.get("freeze", True)
+
+    clip_model = ConchAdapter(
+        model_name=model_name,
+        checkpoint_path=checkpoint_path,
+        device=device,
+        force_image_size=force_image_size,
+        cache_dir=cache_dir,
+        hf_hub=hf_hub,
+        hf_token=hf_token,
+        proj_contrast=proj_contrast,
+        freeze=freeze,
+    )
+    clip_model.to(device)
     return clip_model
 
 
@@ -88,13 +109,14 @@ def build_dataloaders(cfg, num_workers):
     return train_dataset, val_dataset, train_loader, val_loader
 
 
-def build_model(cfg, device):
+def build_model(cfg, device, clip_adapter=None):
     model = ClsNetwork(
         backbone=cfg.model.backbone.config,
         stride=cfg.model.backbone.stride,
         cls_num_classes=cfg.dataset.cls_num_classes,
         num_prototypes_per_class=cfg.model.num_prototypes_per_class,
         prototype_feature_dim=cfg.model.prototype_feature_dim,
+        clip_adapter=clip_adapter,
         n_ratio=cfg.model.n_ratio,
         pretrained=cfg.train.pretrained,
         enable_text_fusion=getattr(cfg.model, "enable_text_fusion", True),
@@ -216,10 +238,17 @@ def compute_proto_text_contrast(feature_map, pseudo_mask, projected_p4, text_fea
     return sum(loss_parts) / len(loss_parts)
 
 
-def build_loss_components(cfg, device):
+def build_loss_components(cfg, device, clip_adapter):
     loss_function = nn.BCEWithLogitsLoss().to(device)
     mask_adapter = MaskAdapter_DynamicThreshold(alpha=cfg.train.mask_adapter_alpha)
-    feature_extractor = FeatureExtractor(mask_adapter=mask_adapter)
+    input_mean, input_std = get_mean_std(cfg.dataset.name)
+    feature_extractor = FeatureExtractor(
+        mask_adapter=mask_adapter,
+        clip_adapter=clip_adapter,
+        clip_size=getattr(cfg.model, "clip_size", None),
+        input_mean=input_mean,
+        input_std=input_std,
+    )
     fg_loss_fn = InfoNCELossFG(temperature=0.07).to(device)
     bg_loss_fn = InfoNCELossBG(temperature=0.07).to(device)
 
@@ -283,7 +312,7 @@ def train(cfg, args):
     print(f"Using device: {device}")
     num_workers = min(10, os.cpu_count())
 
-    clip_model = build_clip_model(device)
+    clip_model = build_clip_model(cfg, device)
     time0 = datetime.datetime.now().replace(microsecond=0)
 
     print("\nPreparing datasets...")
@@ -294,11 +323,11 @@ def train(cfg, args):
     cfg.train.eval_iters = iters_per_epoch
     cfg.scheduler.warmup_iter = cfg.scheduler.warmup_iter * iters_per_epoch
 
-    model = build_model(cfg, device)
+    model = build_model(cfg, device, clip_adapter=clip_model)
     optimizer = build_optimizer(cfg, model)
     start_iter, best_fuse234_dice = resume(args, model, optimizer, device)
 
-    losses = build_loss_components(cfg, device)
+    losses = build_loss_components(cfg, device, clip_model)
     loss_function = losses["cls"]
     feature_extractor = losses["feature_extractor"]
     fg_loss_fn = losses["fg"]
@@ -351,7 +380,7 @@ def train(cfg, args):
                 subclass_labels = expand_parent_to_subclass_labels(cls_labels, k_list)
                 cls4_expand = expand_parent_to_subclass_labels(cls4_merge, k_list)
                 cls4_bir = (cls4 > cls4_expand).float() * subclass_labels
-                batch_info = feature_extractor.process_batch(inputs, cam4, cls4_bir, clip_model)
+                batch_info = feature_extractor.process_batch(inputs, cam4, cls4_bir)
 
                 contrastive_loss = None
                 if batch_info is not None:

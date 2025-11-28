@@ -5,12 +5,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from medclip import MedCLIPModel, MedCLIPVisionModelViT, MedCLIPProcessor
 import os
 import torchvision.utils as vutils
 import cv2
 import torchvision.transforms.functional as TF
 from PIL import Image
+
+from model.conch_adapter import ConchAdapter
 
 # This module implements the adaptive thresholding from Equation 4
 class MaskAdapter_DynamicThreshold(nn.Module):
@@ -41,9 +42,12 @@ class MaskAdapter_DynamicThreshold(nn.Module):
             return binary_mask
 
 class FeatureExtractor:
-    def __init__(self, mask_adapter, clip_size=224):
+    def __init__(self, mask_adapter, clip_adapter: ConchAdapter, clip_size=None, input_mean=None, input_std=None):
         self.mask_adapter = mask_adapter
-        self.clip_size = clip_size
+        self.clip_adapter = clip_adapter
+        self.clip_size = clip_size or clip_adapter.image_size
+        self.input_mean = input_mean
+        self.input_std = input_std
         
     def prepare_cam_mask(self, cam, N):
         cam_224 = F.interpolate(cam, (self.clip_size, self.clip_size), 
@@ -81,17 +85,20 @@ class FeatureExtractor:
         return fg_features, bg_features, fg_masks, bg_masks
         
     # Extracts features from the masked images
-    def get_masked_features(self, fg_features, bg_features, fg_masks, bg_masks, clip_model):
+    def get_masked_features(self, fg_features, bg_features, fg_masks, bg_masks):
         # Gets the feature vector for the foreground region and background region
-        fg_img_features = clip_model.vision_model(fg_features * fg_masks)
-        bg_img_features = clip_model.vision_model(bg_features * bg_masks)
-            
+        fg_img_features = self.clip_adapter.encode_image(fg_features * fg_masks, normalize=True)
+        bg_img_features = self.clip_adapter.encode_image(bg_features * bg_masks, normalize=True)
         return fg_img_features, bg_img_features
 
     # The main function that orchestrates the whole process for a batch
-    def process_batch(self, inputs, cam, label, clip_model):
+    def process_batch(self, inputs, cam, label):
         if not torch.any(label == 1):
             return None
+        
+        # Renormalize into CONCH space if dataset normalization differs
+        if self.input_mean is not None and self.input_std is not None:
+            inputs = self.clip_adapter.normalize_for_conch(inputs, self.input_mean, self.input_std)
             
         cam_224 = F.interpolate(cam, (self.clip_size, self.clip_size), 
                                mode="bilinear", align_corners=True)
@@ -106,7 +113,7 @@ class FeatureExtractor:
         
         # Extracts features from these regions using MedCLIP
         fg_features, bg_features = self.get_masked_features(
-            fg_features, bg_features, fg_masks, bg_masks, clip_model
+            fg_features, bg_features, fg_masks, bg_masks
         )
         
         return {

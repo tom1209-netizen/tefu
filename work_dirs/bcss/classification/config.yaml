@@ -1,6 +1,6 @@
 model:
   backbone:
-    config: mit_b1
+    config: conch_vit
     stride:
     - 4
     - 2
@@ -22,7 +22,7 @@ model:
   prototype_text_noise_std: 0.02
 
   # Learnable context
-  use_ctx_prompt: true
+  use_ctx_prompt: false
   ctx_prompt_len: 8
   ctx_class_specific: true
 
@@ -32,6 +32,16 @@ model:
   - Stroma (STR) comprises the surrounding connective tissue, including fibroblasts and collagen fibers, often appearing as pink fibrous structures and sometimes showing desmoplastic reactions to tumor invasion.
   - Lymphocyte (LYM) regions contain dense clusters of small immune cells with dark, round nuclei and minimal cytoplasm, reflecting the host immune response within the tumor microenvironment.
   - Necrosis (NEC) represents areas of dead or dying tissue with pale, structureless eosinophilic regions, nuclear debris, and “ghost” cell remnants, typically associated with aggressive tumor growth and poor vascularization.
+
+clip:
+  model_name: conch_ViT-B-16
+  checkpoint_path: ./checkpoints/conch/pytorch_model.bin
+  cache_dir: ./checkpoints/conch
+  hf_hub: null
+  hf_token: null
+  force_image_size: 448
+  proj_contrast: false
+  freeze: true
 
 dataset:
   name: bcss

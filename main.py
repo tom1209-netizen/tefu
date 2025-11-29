@@ -406,7 +406,7 @@ def train(cfg, args):
                 pseudo_mask_resized = F.interpolate(
                     pseudo_mask.unsqueeze(1).float(), size=feature_map_for_diversity.shape[2:], mode="nearest"
                 ).squeeze(1).long()
-                diversity_loss = diversity_loss_fn(feature_map_for_diversity, l_fea, pseudo_mask_resized, global_step=n_iter)
+                diversity_loss = diversity_loss_fn(feature_map_for_diversity, projected_p4, pseudo_mask_resized, global_step=n_iter)
                 iter_diversity_loss = diversity_loss.detach().item()
                 diversity_running_avg = monitor_diversity_loss(diversity_meter, diversity_loss)
 

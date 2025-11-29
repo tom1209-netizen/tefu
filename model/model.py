@@ -1,7 +1,7 @@
 import math
 import pickle as pkl
 from functools import partial
-from typing import Optional, Union
+from typing import Optional, Union, List
 
 import torch
 import torch.nn as nn
@@ -215,6 +215,7 @@ class ClsNetwork(nn.Module):
         self.stride = stride
         self.cam_fusion_levels = (1, 2, 3)  # use scales 2,3,4 for fusion
         self.clip_adapter = clip_adapter
+        self.clip_visual_dim = None
 
         # Align prototype dimensionality with CONCH embedding space when provided
         if self.clip_adapter is not None:
@@ -227,8 +228,14 @@ class ClsNetwork(nn.Module):
             raise ValueError("Backbone set to CONCH but clip_adapter is missing.")
         self.encoder = None
         if self.use_clip_visual:
-            # Use CONCH visual features directly; create a placeholder channel layout
-            self.in_channels = [self.prototype_feature_dim] * 4
+            trunk = getattr(getattr(self.clip_adapter.model, "visual", None), "trunk", None)
+            visual_width = (
+                getattr(trunk, "embed_dim", None)
+                or getattr(trunk, "num_features", None)
+                or self.prototype_feature_dim
+            )
+            self.clip_visual_dim = visual_width
+            self.in_channels = [visual_width] * 4
         else:
             self.encoder = getattr(mix_transformer, backbone)(stride=self.stride)
             self.in_channels = self.encoder.embed_dims

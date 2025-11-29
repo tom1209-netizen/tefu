@@ -45,7 +45,15 @@ class FeatureExtractor:
     def __init__(self, mask_adapter, clip_adapter: ConchAdapter, clip_size=None, input_mean=None, input_std=None):
         self.mask_adapter = mask_adapter
         self.clip_adapter = clip_adapter
-        self.clip_size = clip_size or clip_adapter.image_size
+        # Ensure clip_size is a 2-tuple of ints for interpolate
+        size = clip_size or clip_adapter.image_size
+        if isinstance(size, (list, tuple)):
+            if len(size) == 2:
+                self.clip_size = (int(size[0]), int(size[1]))
+            else:
+                self.clip_size = (int(size[0]), int(size[0]))
+        else:
+            self.clip_size = (int(size), int(size))
         self.input_mean = input_mean
         self.input_std = input_std
         
@@ -100,7 +108,7 @@ class FeatureExtractor:
         if self.input_mean is not None and self.input_std is not None:
             inputs = self.clip_adapter.normalize_for_conch(inputs, self.input_mean, self.input_std)
             
-        cam_224 = F.interpolate(cam, (self.clip_size, self.clip_size), 
+        cam_224 = F.interpolate(cam, self.clip_size, 
                                mode="bilinear", align_corners=True)
        
        # Applies adaptive thresholding to get the binary mask

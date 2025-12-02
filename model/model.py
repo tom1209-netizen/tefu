@@ -349,7 +349,7 @@ class ClsNetwork(nn.Module):
                  backbone='mit_b1',
                  cls_num_classes=4,
                  num_prototypes_per_class=10,
-                 prototype_feature_dim=512,
+                 prototype_feature_dim=768,
                  clip_adapter: Optional[ConchAdapter] = None,
                  stride=[4, 2, 2, 1],
                  pretrained=True,
@@ -391,9 +391,6 @@ class ClsNetwork(nn.Module):
         self.guidance_layers = tuple(
             int(g) for g in raw_guidance_layers if isinstance(g, int) and g >= 0)
 
-        # Align prototype dimensionality with CONCH embedding space when provided
-        if self.clip_adapter is not None:
-            prototype_feature_dim = self.clip_adapter.embed_dim
         self.prototype_feature_dim = prototype_feature_dim
 
         # Backbone Encoder

@@ -9,11 +9,11 @@ model:
   
   n_ratio: 0.5
   num_prototypes_per_class: 3
-  prototype_feature_dim: 512
+  prototype_feature_dim: 768
 
   # Text fusion settings
   enable_text_fusion: true
-  fusion_dim: 512
+  fusion_dim: 768
 
   # Text prompt settings
   learnable_text_prompt: true

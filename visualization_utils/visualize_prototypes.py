@@ -168,6 +168,10 @@ def build_model(cfg, checkpoint_path, device):
         input_mean=input_mean,
         input_std=input_std,
         use_structure_adapter=guidance_cfg.get("use_structure_adapter", False),
+        enable_cocoop=getattr(cfg.model, "enable_cocoop", False),
+        cocoop_n_ctx=getattr(cfg.model, "cocoop_n_ctx", 4),
+        cocoop_ctx_init=getattr(cfg.model, "cocoop_ctx_init", "a photo of a"),
+        cocoop_class_names=getattr(cfg.model, "cocoop_class_names", None),
     )
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint["model"], strict=False)

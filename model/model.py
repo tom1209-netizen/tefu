@@ -74,6 +74,91 @@ class FeatureRefinementHead(nn.Module):
         return self.net(x)
 
 
+class MetaNet(nn.Module):
+    """
+    Lightweight conditioner from CoCoOp: maps visual features to a context shift.
+    """
+
+    def __init__(self, vis_dim, ctx_dim, hidden_dim=None):
+        super().__init__()
+        hidden_dim = hidden_dim or max(1, vis_dim // 16)
+        self.net = nn.Sequential(
+            nn.Linear(vis_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, ctx_dim),
+        )
+
+    def forward(self, img_feat):
+        return self.net(img_feat)
+
+
+class CoCoOpLearner(nn.Module):
+    """
+    Instance-conditioned prompt learner (CoCoOp) that outputs per-image, per-class
+    text embeddings given global visual features.
+    """
+
+    def __init__(self, clip_adapter: ConchAdapter, class_names: List[str], vis_dim: int, n_ctx: int = 4, ctx_init: Optional[str] = "a photo of a"):
+        super().__init__()
+        self.clip_adapter = clip_adapter
+        self.class_names = [str(name).replace("_", " ")
+                            for name in class_names]
+        self.n_cls = len(self.class_names)
+        self.n_ctx = n_ctx
+        self.meta_net = MetaNet(vis_dim, clip_adapter.embed_dim)
+
+        token_embedding = clip_adapter.get_token_embedding()
+        if token_embedding is None:
+            raise RuntimeError(
+                "Unable to access CONCH token embedding for CoCoOp.")
+        dtype = token_embedding.weight.dtype
+        embed_dim = clip_adapter.embed_dim
+
+        if ctx_init:
+            ctx_init = ctx_init.replace("_", " ")
+            n_ctx = len(ctx_init.split(" "))
+            tokenized = clip_adapter.tokenize(ctx_init)
+            with torch.no_grad():
+                embedding = token_embedding(tokenized).type(dtype)
+            ctx_vectors = embedding[0, 1: 1 + n_ctx, :]
+            prompt_prefix = ctx_init
+        else:
+            ctx_vectors = torch.empty(self.n_ctx, embed_dim, dtype=dtype)
+            nn.init.normal_(ctx_vectors, std=0.02)
+            prompt_prefix = " ".join(["X"] * self.n_ctx)
+        self.ctx = nn.Parameter(ctx_vectors)
+
+        prompts = [prompt_prefix + " " + name +
+                   "." for name in self.class_names]
+        tokenized_prompts = clip_adapter.tokenize(prompts)
+        with torch.no_grad():
+            embedding = token_embedding(tokenized_prompts).type(dtype)
+        self.register_buffer(
+            "token_prefix", embedding[:, :1, :], persistent=False)
+        self.register_buffer(
+            "token_suffix", embedding[:, 1 + self.ctx.shape[0]:, :], persistent=False)
+
+    def forward(self, img_features: torch.Tensor) -> torch.Tensor:
+        """
+        img_features: [B, vis_dim] visual features (no grad to CLIP required).
+        Returns text embeddings: [B, n_cls, embed_dim]
+        """
+        b = img_features.shape[0]
+        bias = self.meta_net(img_features).unsqueeze(1)  # [B, 1, D]
+        ctx = self.ctx.unsqueeze(0) + bias  # [B, n_ctx, D]
+
+        prefix = self.token_prefix.unsqueeze(0).expand(b, -1, -1, -1)
+        suffix = self.token_suffix.unsqueeze(0).expand(b, -1, -1, -1)
+        ctx_expanded = ctx.unsqueeze(1).expand(-1, self.n_cls, -1, -1)
+        prompts = torch.cat([prefix, ctx_expanded, suffix],
+                            dim=2)  # [B, n_cls, L, D]
+        prompts_flat = prompts.view(-1, prompts.shape[2], prompts.shape[3])
+        text_features = self.clip_adapter.encode_text_with_embeddings(
+            prompts_flat)
+        text_features = text_features.view(b, self.n_cls, -1)
+        return text_features
+
+
 class AdaptiveLayer(nn.Module):
     def __init__(self, in_dim, n_ratio, out_dim):
         super().__init__()
@@ -285,6 +370,10 @@ class ClsNetwork(nn.Module):
                  input_mean: Optional[Union[list, tuple]] = None,
                  input_std: Optional[Union[list, tuple]] = None,
                  use_structure_adapter: bool = False,
+                 enable_cocoop: bool = False,
+                 cocoop_n_ctx: int = 4,
+                 cocoop_ctx_init: Optional[str] = "a photo of a",
+                 cocoop_class_names: Optional[List[str]] = None,
                  ):
         super().__init__()
         self.cls_num_classes = cls_num_classes
@@ -315,6 +404,8 @@ class ClsNetwork(nn.Module):
                 self.clip_adapter, "freeze", True)
         self.enable_segformer_guidance = bool(
             enable_segformer_guidance and self.use_clip_visual)
+        self.enable_cocoop = bool(
+            enable_cocoop and self.use_clip_visual and self.clip_adapter is not None)
         self.segformer_teacher = None
         self.structural_loss_fn = StructuralConsistencyLoss(
         ) if self.enable_segformer_guidance else None
@@ -331,6 +422,21 @@ class ClsNetwork(nn.Module):
             )
             self.clip_visual_dim = visual_width
             self.in_channels = [visual_width] * 4
+            self.cocoop_learner = None
+            if self.enable_cocoop:
+                names = cocoop_class_names
+                if names is None:
+                    if text_prompts is not None and isinstance(text_prompts, (list, tuple)):
+                        names = [str(p) for p in text_prompts]
+                    else:
+                        names = [f"Class {i}" for i in range(cls_num_classes)]
+                self.cocoop_learner = CoCoOpLearner(
+                    clip_adapter=self.clip_adapter,
+                    class_names=names,
+                    vis_dim=self.clip_visual_dim,
+                    n_ctx=cocoop_n_ctx,
+                    ctx_init=cocoop_ctx_init,
+                )
 
             if self.enable_segformer_guidance:
                 self.segformer_teacher = getattr(
@@ -479,6 +585,7 @@ class ClsNetwork(nn.Module):
 
     def forward(self, x):
         text_feats_init = self.init_prototypes_from_text(x.device)
+        cocoop_text_feats = None
         distill_loss = None
         teacher_features = None
         if self.segformer_teacher is not None and self.training:
@@ -498,6 +605,12 @@ class ClsNetwork(nn.Module):
             conch_std = torch.tensor(
                 [0.5, 0.5, 0.5], device=x.device).view(1, 3, 1, 1)
             x_conch = (x_raw - conch_mean) / conch_std
+            cocoop_text_feats = None
+            if self.enable_cocoop and self.cocoop_learner is not None:
+                with torch.no_grad():
+                    global_img_feat = self.clip_adapter.encode_image(
+                        x_conch, normalize=True)
+                cocoop_text_feats = self.cocoop_learner(global_img_feat)
             if self.use_structure_adapter:
                 with torch.no_grad():
                     _x_all = self.clip_adapter.visual_intermediates(
@@ -538,71 +651,97 @@ class ClsNetwork(nn.Module):
                 distill_loss = sum(guided_losses) / len(guided_losses)
 
         imshapes = [f.shape for f in _x_all]
-        image_features = [
-            f.permute(0, 2, 3, 1).reshape(-1, f.shape[1]) for f in _x_all]
-        _x1, _x2, _x3, _x4 = image_features
+        feats_flat = [
+            f.permute(0, 2, 3, 1).reshape(f.shape[0], -1, f.shape[1]) for f in _x_all
+        ]  # [B, HW, C] per level
 
-        # Projects the single set of learnable prototypes to match the feature dimensions at each scale
-        projected_p1 = self.l_fc1(self.prototypes)
-        projected_p2 = self.l_fc2(self.prototypes)
-        projected_p3 = self.l_fc3(self.prototypes)
-        projected_p4 = self.l_fc4(self.prototypes)
+        # Build prototypes: dynamic (CoCoOp) + static offsets, or static only
+        protos_dynamic = None
+        if self.enable_cocoop and cocoop_text_feats is not None:
+            k = self.num_prototypes_per_class
+            proto_offset = self.prototypes.view(1, self.cls_num_classes, k, -1)
+            dynamic = cocoop_text_feats.unsqueeze(2).expand(-1, -1, k, -1)
+            protos_dynamic = (dynamic + proto_offset).reshape(
+                cocoop_text_feats.shape[0], -1, self.prototype_feature_dim
+            )  # [B, total, D]
+        protos_static = self.prototypes  # [total, D]
 
-        # Scale 1 Calculation
-        # Normalize pixel features for cosine similarity calculation
-        _x1_norm = _x1 / _x1.norm(dim=-1, keepdim=True)
-        # Normalize the projected prototypes as well for true cosine similarity
-        p1_norm = projected_p1 / projected_p1.norm(dim=-1, keepdim=True)
-        # Calculate cosine similarity between each pixel feature and all projected prototypes
-        logits1 = self.logit_scale1 * _x1_norm @ p1_norm.t().float()
-        # Reshape the output back into a map [B, C, H, W], where C is the total number of prototypes
-        out1 = logits1.view(
-            imshapes[0][0], imshapes[0][2], imshapes[0][3], -1).permute(0, 3, 1, 2)
-        cam1 = out1.clone().detach()  # The Class Activation Map (CAM)
-        # Apply Global Average Pooling to the CAM to get the image-level classification score
-        cls1 = self.pooling(out1, (1, 1)).view(-1, self.total_prototypes)
+        # Project prototypes (static for compatibility, dynamic for CoCoOp logits)
+        projected_static = (
+            self.l_fc1(protos_static),
+            self.l_fc2(protos_static),
+            self.l_fc3(protos_static),
+            self.l_fc4(protos_static),
+        )
+        projected_dynamic = None
+        if protos_dynamic is not None:
+            projected_dynamic = (
+                self.l_fc1(protos_dynamic),
+                self.l_fc2(protos_dynamic),
+                self.l_fc3(protos_dynamic),
+                self.l_fc4(protos_dynamic),
+            )
 
-        # Scale 2 Calculation
-        _x2_norm = _x2 / _x2.norm(dim=-1, keepdim=True)
-        p2_norm = projected_p2 / projected_p2.norm(dim=-1, keepdim=True)
-        logits2 = self.logit_scale2 * _x2_norm @ p2_norm.t().float()
-        out2 = logits2.view(
-            imshapes[1][0], imshapes[1][2], imshapes[1][3], -1).permute(0, 3, 1, 2)
+        def compute_logits(feats, protos, scale):
+            """
+            feats: [B, HW, C_feat]
+            protos: [total, C_proto] or [B, total, C_proto]
+            returns: [B, total, HW]
+            """
+            feats_norm = feats / (feats.norm(dim=-1, keepdim=True) + 1e-6)
+            if protos.dim() == 2:
+                proto_norm = protos / \
+                    (protos.norm(dim=-1, keepdim=True) + 1e-6)
+                logits = torch.matmul(
+                    feats_norm, proto_norm.t().float())  # [B, HW, P]
+            else:
+                proto_norm = protos / \
+                    (protos.norm(dim=-1, keepdim=True) + 1e-6)
+                logits = torch.bmm(
+                    feats_norm, proto_norm.transpose(1, 2))  # [B, HW, P]
+            logits = logits.permute(0, 2, 1)  # [B, P, HW]
+            return scale * logits
+
+        def logits_to_map(logits, h, w):
+            return logits.view(logits.shape[0], logits.shape[1], h, w)
+
+        # Select which prototype set to use for logits/CAMs
+        p_set = projected_dynamic if projected_dynamic is not None else projected_static
+
+        logits1 = compute_logits(feats_flat[0], p_set[0], self.logit_scale1)
+        out1 = logits_to_map(logits1, imshapes[0][2], imshapes[0][3])
+        cam1 = out1.clone().detach()
+        cls1 = self.pooling(out1, (1, 1)).view(out1.shape[0], -1)
+
+        logits2 = compute_logits(feats_flat[1], p_set[1], self.logit_scale2)
+        out2 = logits_to_map(logits2, imshapes[1][2], imshapes[1][3])
         cam2 = out2.clone().detach()
-        cls2 = self.pooling(out2, (1, 1)).view(-1, self.total_prototypes)
+        cls2 = self.pooling(out2, (1, 1)).view(out2.shape[0], -1)
 
-        # Scale 3 Calculation
-        _x3_norm = _x3 / _x3.norm(dim=-1, keepdim=True)
-        p3_norm = projected_p3 / projected_p3.norm(dim=-1, keepdim=True)
-        logits3 = self.logit_scale3 * _x3_norm @ p3_norm.t().float()
-        out3 = logits3.view(
-            imshapes[2][0], imshapes[2][2], imshapes[2][3], -1).permute(0, 3, 1, 2)
+        logits3 = compute_logits(feats_flat[2], p_set[2], self.logit_scale3)
+        out3 = logits_to_map(logits3, imshapes[2][2], imshapes[2][3])
         cam3 = out3.clone().detach()
-        cls3 = self.pooling(out3, (1, 1)).view(-1, self.total_prototypes)
+        cls3 = self.pooling(out3, (1, 1)).view(out3.shape[0], -1)
 
-        # Scale 4 Calculation
-        _x4_norm = _x4 / _x4.norm(dim=-1, keepdim=True)
-        p4_norm = projected_p4 / projected_p4.norm(dim=-1, keepdim=True)
-        logits4 = self.logit_scale4 * _x4_norm @ p4_norm.t().float()
-        out4 = logits4.view(
-            imshapes[3][0], imshapes[3][2], imshapes[3][3], -1).permute(0, 3, 1, 2)
-        # For the final layer's CAM, we keep the gradient attached for the contrastive loss
+        logits4 = compute_logits(feats_flat[3], p_set[3], self.logit_scale4)
+        out4 = logits_to_map(logits4, imshapes[3][2], imshapes[3][3])
         cam4 = out4.clone()
-        cls4 = self.pooling(out4, (1, 1)).view(-1, self.total_prototypes)
+        cls4 = self.pooling(out4, (1, 1)).view(out4.shape[0], -1)
 
         feature_map_for_diversity = _x_all[3]
 
         cam_weights = None
-        text_features_out = text_feats_init
+        text_features_out = cocoop_text_feats if cocoop_text_feats is not None else text_feats_init
         if self.text_fusion is not None:
             pooled_feats = [
                 self.pooling(_x_all[idx], (1, 1)).flatten(1)
                 for idx in self.cam_fusion_levels
             ]
-            proto_levels = [projected_p2, projected_p3, projected_p4]
+            proto_levels = [projected_static[1],
+                            projected_static[2], projected_static[3]]
             fusion_out = self.text_fusion(
                 pooled_feats, proto_levels, return_text=True)
             cam_weights, text_features_out = fusion_out
 
         return (cls1, cam1, cls2, cam2, cls3, cam3, cls4, cam4,
-                self.prototypes, self.k_list, feature_map_for_diversity, cam_weights, projected_p4, text_features_out, distill_loss)
+                self.prototypes, self.k_list, feature_map_for_diversity, cam_weights, projected_static[3], text_features_out, distill_loss)

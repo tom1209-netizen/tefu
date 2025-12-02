@@ -35,6 +35,12 @@ model:
     train_clip_visual: false
     use_structure_adapter: true
 
+  # CoCoOp (conditional prompts)
+  enable_cocoop: true
+  cocoop_n_ctx: 4
+  cocoop_ctx_init: "Histopathology image showing"
+  cocoop_class_names: null
+
   # Text prompts for each class
   text_prompts:
   - Tumor (TUM) regions consist of malignant epithelial cells characterized by pleomorphic, hyperchromatic nuclei, loss of glandular structure, and frequent mitotic figures, representing the core cancerous lesions in breast tissue.

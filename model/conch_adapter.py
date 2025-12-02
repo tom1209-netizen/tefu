@@ -114,6 +114,56 @@ class ConchAdapter(nn.Module):
                 token_ids.to(self.device), normalize=normalize)
         return text_latent
 
+    # CoCoOp helpers
+    def get_token_embedding(self):
+        """
+        Expose raw token embedding layer for building custom prompts.
+        """
+        if hasattr(self.model, "token_embedding"):
+            return self.model.token_embedding
+        if hasattr(getattr(self.model, "transformer", None), "token_embedding"):
+            return self.model.transformer.token_embedding
+        return None
+
+    def encode_text_with_embeddings(self, embeddings: torch.Tensor, normalize: bool = True) -> torch.Tensor:
+        """
+        Encode text when token embeddings are preassembled. Gradients are not
+        propagated into the CONCH text encoder.
+        """
+        model = self.model
+        device = embeddings.device
+        with torch.no_grad():
+            x = embeddings
+            pos_emb = getattr(model, "positional_embedding", None)
+            if pos_emb is not None:
+                pe = pos_emb
+                if pe.shape[0] < x.shape[1]:
+                    pe = F.interpolate(
+                        pe.unsqueeze(0).permute(0, 2, 1),
+                        size=x.shape[1],
+                        mode="linear",
+                        align_corners=False,
+                    ).permute(0, 2, 1).squeeze(0)
+                x = x + pe[: x.shape[1], :].to(device)
+
+            if hasattr(model, "transformer"):
+                x = x.permute(1, 0, 2)  # NLD -> LND
+                x = model.transformer(x)
+                x = x.permute(1, 0, 2)  # LND -> NLD
+
+            if hasattr(model, "ln_final"):
+                x = model.ln_final(x)
+
+            x = x[:, -1, :]
+
+            text_proj = getattr(model, "text_projection", None)
+            if text_proj is not None:
+                x = x @ text_proj
+
+            if normalize:
+                x = F.normalize(x, dim=-1)
+        return x
+
     # Image
     def encode_image(self, images: torch.Tensor, normalize: bool = True) -> torch.Tensor:
         """

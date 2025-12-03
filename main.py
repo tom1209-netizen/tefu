@@ -22,6 +22,7 @@ from utils.hierarchical_utils import (
     merge_to_parent_predictions,
     pair_features,
 )
+from utils.memory_bank import FeatureMemoryBank
 from utils.optimizer import PolyWarmupAdamW
 from utils.pyutils import AverageMeter, set_seed
 from utils.trainutils import get_cls_dataset, get_mean_std
@@ -361,6 +362,12 @@ def train(cfg, args):
     lambda_proto_text = losses["lambda_proto_text"]
     proto_text_temp = losses["proto_text_temp"]
     lambda_struct = getattr(cfg.train, "l_struct", 0.0)
+    memory_size = getattr(cfg.train, "memory_bank_size", 0)
+    memory_bank = FeatureMemoryBank(
+        feature_dim=cfg.model.prototype_feature_dim,
+        size=memory_size,
+        device=device,
+    ) if memory_size > 0 else None
 
     scaler = torch.cuda.amp.GradScaler()
     model.train()
@@ -464,9 +471,12 @@ def train(cfg, args):
                         set_info["fg_text"],
                         set_info["bg_text"],
                     )
-                    fg_loss = fg_loss_fn(fg_features, fg_pro, bg_pro)
+                    mem_queue = memory_bank.get_negatives() if memory_bank is not None else None
+                    fg_loss = fg_loss_fn(fg_features, fg_pro, bg_pro, memory_queue=mem_queue)
                     bg_loss = bg_loss_fn(bg_features, fg_pro, bg_pro)
                     contrastive_loss = fg_loss + bg_loss
+                    if memory_bank is not None:
+                        memory_bank.push(bg_pro)
 
                 with torch.no_grad():
                     cam4_merged = merge_subclass_cams_to_parent(

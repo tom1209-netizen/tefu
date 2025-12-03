@@ -83,7 +83,9 @@ train:
   l2: 0.1
   l3: 1.0
   l4: 1.0
-  l5: 0.1
+
+  # Contrastive loss
+  l5: 0.2
 
   # Prototype losses
   l_proto_text: 0.1
@@ -101,6 +103,9 @@ train:
     omega_min_mass: 0.05
     spatial_weight: 0.1
     spatial_jeffreys_weight: 0.05
+
+  # Memory bank for contrastive learning
+  memory_bank_size: 2048
 
   # Mask settings
   mask_adapter_alpha: 0.5

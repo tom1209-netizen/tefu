@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -29,9 +31,9 @@ class PrototypeDiversityRegularizer(nn.Module):
 
     def forward(
         self,
-        cam_maps: torch.Tensor | None,
-        prototypes: torch.Tensor | None = None,
-        proto_mask: torch.Tensor | None = None,
+        cam_maps: Optional[torch.Tensor],
+        prototypes: Optional[torch.Tensor] = None,
+        proto_mask: Optional[torch.Tensor] = None,
         global_step=None,
     ):
         """

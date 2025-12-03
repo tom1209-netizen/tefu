@@ -31,6 +31,14 @@ proto:
 	if [ -n "$(OUT_DIR)" ]; then OUT_ARG="--out-dir $(OUT_DIR)"; fi; \
 	python visualization_utils/visualize_prototypes.py --config $(CONFIG) --checkpoint $(CHECKPOINT) --gpu $(GPU) --split $(SPLIT) --images $(IMAGES) $$OUT_ARG
 
+
+.PHONY: clean
+clean:
+	@echo "Cleaning up log and output directories..."
+	@rm -rf $(LOG_DIR)/*
+	@rm -rf $(OUT_DIR)/*
+	@echo "Cleanup complete."
+
 .PHONY: help
 help:
 	@echo "======================================================================"
@@ -66,5 +74,6 @@ help:
 	@echo "                    IMAGES   : (Required) Space-separated filenames"
 	@echo "                    CONFIG, CHECKPOINT, GPU, SPLIT, OUT_DIR"
 	@echo ""
+	@echo "  clean           Remove all files in LOG_DIR and OUT_DIR."
 	@echo "  help            Show this help message."
 	@echo "======================================================================"

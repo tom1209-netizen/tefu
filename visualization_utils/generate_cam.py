@@ -1,16 +1,15 @@
-from utils.validate import generate_cam
-from utils.trainutils import get_cls_dataset, get_mean_std
-from utils.pyutils import set_seed
-from model.conch_adapter import ConchAdapter
+from torch.utils.data import DataLoader
+from omegaconf import OmegaConf
+import torch
 from model.model import ClsNetwork
+from model.conch_adapter import ConchAdapter
+from utils.pyutils import set_seed
+from utils.trainutils import get_cls_dataset, get_mean_std
+from utils.validate import generate_cam
 import argparse
 import os
 import sys
 from pathlib import Path
-
-import torch
-from omegaconf import OmegaConf
-from torch.utils.data import DataLoader
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:

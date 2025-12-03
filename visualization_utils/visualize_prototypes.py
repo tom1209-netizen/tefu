@@ -1,30 +1,30 @@
-from utils.trainutils import get_mean_std
-from utils.validate import fuse_cams_with_weights, get_seg_label
 from utils.hierarchical_utils import merge_subclass_cams_to_parent
-from model.conch_adapter import ConchAdapter
+from utils.validate import fuse_cams_with_weights, get_seg_label
+from utils.trainutils import get_mean_std
 from model.model import ClsNetwork
+from model.conch_adapter import ConchAdapter
 from tqdm import tqdm
 from PIL import Image
 from omegaconf import OmegaConf
-from albumentations.pytorch import ToTensorV2
 import torch.nn.functional as F
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib
+import cv2
+from albumentations.pytorch import ToTensorV2
+import albumentations as A
 import argparse
 import os
 import sys
 from pathlib import Path
 import warnings
 
-import albumentations as A
-import cv2
-import matplotlib
-matplotlib.use("Agg")
-
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+matplotlib.use("Agg")
 
 
 warnings.filterwarnings("ignore", category=UserWarning, module="matplotlib")
@@ -182,7 +182,34 @@ def build_model(cfg, checkpoint_path, device):
 
 def extract_features_and_prototypes(model, image_tensor):
     with torch.no_grad():
-        feature_maps, _ = model.encoder(image_tensor)
+        if model.encoder is not None:
+            feature_maps, _ = model.encoder(image_tensor)
+        else:
+            # CONCH backbone stores encoder inside the adapter; grab its feature maps directly
+            if not getattr(model, "clip_adapter", None):
+                raise RuntimeError(
+                    "Model has no encoder or clip_adapter; cannot extract features.")
+            device = image_tensor.device
+            x_raw = image_tensor * model.input_std.to(device) + \
+                model.input_mean.to(device)
+            conch_mean = torch.tensor(
+                [0.5, 0.5, 0.5], device=device).view(1, 3, 1, 1)
+            conch_std = torch.tensor(
+                [0.5, 0.5, 0.5], device=device).view(1, 3, 1, 1)
+            x_conch = (x_raw - conch_mean) / conch_std
+            feature_maps = model.clip_adapter.visual_intermediates(
+                x_conch, use_grad=False)
+            if model.use_structure_adapter and model.structure_adapters is not None:
+                feature_maps = [f.detach() for f in feature_maps]
+                feature_maps = [adapter(fmap) for adapter, fmap in zip(
+                    model.structure_adapters, feature_maps)]
+            if not feature_maps:
+                raise RuntimeError(
+                    "CONCH visual encoder did not return any feature maps.")
+            while len(feature_maps) < 4:
+                feature_maps.append(F.avg_pool2d(
+                    feature_maps[-1], kernel_size=2, stride=2))
+
         feature_map = feature_maps[3].detach()
         prototypes = model.prototypes.detach()
         projected = model.l_fc4(prototypes).detach()

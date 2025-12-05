@@ -14,6 +14,7 @@ import re
 
 class BCSSTrainingDataset(Dataset):
     CLASSES = ["TUM", "STR", "LYM", "NEC", "BACK"]
+
     def __init__(self, img_root="../data/BCSS-WSSS/train", transform=None):
         super(BCSSTrainingDataset, self).__init__()
         self.get_images_and_labels(img_root)
@@ -25,9 +26,12 @@ class BCSSTrainingDataset(Dataset):
     def __getitem__(self, index):
         img_path = self.img_paths[index]
         cls_label = self.cls_labels[index]
-        assert os.path.exists(img_path), "img_path: {} does not exists".format(img_path)
+        assert os.path.exists(
+            img_path), "img_path: {} does not exists".format(img_path)
 
         img = cv.imread(img_path, cv.IMREAD_UNCHANGED)
+
+        img = cv.cvtColor(img, cv.COLOR_BGR2RGB)
 
         if self.transform is not None:
             img = self.transform(image=img)["image"]
@@ -47,6 +51,7 @@ class BCSSTrainingDataset(Dataset):
 
 class BCSSTestDataset(Dataset):
     CLASSES = ["TUM", "STR", "LYM", "NEC", "BACK"]
+
     def __init__(self, img_root="../data/BCSS-WSSS/", split="test", transform=None):
         assert split in ["test", "valid"], "split must be one of [test, valid]"
         super(BCSSTestDataset, self).__init__()
@@ -59,13 +64,17 @@ class BCSSTestDataset(Dataset):
     def __getitem__(self, index):
         img_path = self.img_paths[index]
         mask_path = self.mask_paths[index]
-        assert os.path.exists(img_path), "img_path: {} does not exists".format(img_path)
-        assert os.path.exists(mask_path), "mask_path: {} does not exists".format(mask_path)
+        assert os.path.exists(
+            img_path), "img_path: {} does not exists".format(img_path)
+        assert os.path.exists(
+            mask_path), "mask_path: {} does not exists".format(mask_path)
 
         img = cv.imread(img_path, cv.IMREAD_UNCHANGED)
+        img = cv.cvtColor(img, cv.COLOR_BGR2RGB)
         mask = np.array(Image.open(mask_path))
         cls_label = np.array([0, 0, 0, 0])
-        x = np.unique(mask) if np.unique(mask)[-1] != 4 else np.unique(mask)[:-1]
+        x = np.unique(mask) if np.unique(
+            mask)[-1] != 4 else np.unique(mask)[:-1]
         cls_label[x] = 1
 
         if self.transform is not None:
@@ -79,15 +88,18 @@ class BCSSTestDataset(Dataset):
         self.img_paths = []
         self.mask_paths = []
 
-        self.mask_paths = glob.glob(os.path.join(img_root, split, "mask", "*.png"))
+        self.mask_paths = glob.glob(
+            os.path.join(img_root, split, "mask", "*.png"))
 
         for mask_path in self.mask_paths:
             img_name = os.path.basename(mask_path)
-            self.img_paths.append(os.path.join(img_root, split, "img", img_name))
+            self.img_paths.append(os.path.join(
+                img_root, split, "img", img_name))
 
 
 class BCSSWSSSDataset(Dataset):
     CLASSES = ["TUM", "STR", "LYM", "NEC", "BACK"]
+
     def __init__(self, img_root="../data/BCSS-WSSS/train", mask_name="pseudo_label", transform=None):
         super(BCSSWSSSDataset, self).__init__()
         self.get_images_and_labels(img_root, mask_name)
@@ -100,8 +112,10 @@ class BCSSWSSSDataset(Dataset):
         img_path = self.img_paths[index]
         mask_path = self.mask_paths[index]
         cls_label = self.cls_labels[index]
-        assert os.path.exists(img_path), "image path: {}, does not exist".format(img_path)
-        assert os.path.exists(mask_path), "mask path: {}, does not exist".format(mask_path)
+        assert os.path.exists(
+            img_path), "image path: {}, does not exist".format(img_path)
+        assert os.path.exists(
+            mask_path), "mask path: {}, does not exist".format(mask_path)
 
         img = cv.imread(img_path, cv.IMREAD_UNCHANGED)
         mask = np.array(Image.open(mask_path))

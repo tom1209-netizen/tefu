@@ -1,10 +1,10 @@
 from torch.utils.data import DataLoader
 from omegaconf import OmegaConf
 import torch
-from model.model import ClsNetwork
+from model.model import DistilledConch
 from model.conch_adapter import ConchAdapter
 from utils.pyutils import set_seed
-from utils.trainutils import get_cls_dataset, get_mean_std
+from utils.trainutils import get_cls_dataset
 from utils.validate import generate_cam
 import argparse
 import os
@@ -53,41 +53,18 @@ def build_model(cfg, checkpoint_path, device):
         )
     guidance_cfg = OmegaConf.to_container(
         getattr(cfg.model, "segformer_guidance", {}), resolve=True)
-    input_mean, input_std = get_mean_std(cfg.dataset.name)
-    model = ClsNetwork(
-        backbone=cfg.model.backbone.config,
-        stride=cfg.model.backbone.stride,
+    model = DistilledConch(
         cls_num_classes=cfg.dataset.cls_num_classes,
         num_prototypes_per_class=cfg.model.num_prototypes_per_class,
         prototype_feature_dim=cfg.model.prototype_feature_dim,
         clip_adapter=clip_adapter,
-        n_ratio=cfg.model.n_ratio,
-        pretrained=False,
-        enable_text_fusion=getattr(cfg.model, "enable_text_fusion", True),
-        text_prompts=getattr(cfg.model, "text_prompts", None),
-        fusion_dim=getattr(cfg.model, "fusion_dim", None),
-        learnable_text_prompt=getattr(
-            cfg.model, "learnable_text_prompt", False),
-        prompt_init_scale=getattr(cfg.model, "prompt_init_scale", 0.02),
-        prototype_init_mode=getattr(
-            cfg.model, "prototype_init_mode", "text_learnable"),
-        prototype_text_noise_std=getattr(
-            cfg.model, "prototype_text_noise_std", 0.02),
-        use_ctx_prompt=getattr(cfg.model, "use_ctx_prompt", False),
-        ctx_prompt_len=getattr(cfg.model, "ctx_prompt_len", 8),
-        ctx_class_specific=getattr(cfg.model, "ctx_class_specific", False),
-        enable_segformer_guidance=guidance_cfg.get("enable", False),
+        enable_segformer_guidance=guidance_cfg.get("enable", True),
         segformer_backbone=guidance_cfg.get("backbone", "mit_b1"),
         segformer_checkpoint=guidance_cfg.get("checkpoint", None),
         guidance_layers=tuple(guidance_cfg.get("layers", (2,))),
-        train_clip_visual=guidance_cfg.get("train_clip_visual", None),
-        input_mean=input_mean,
-        input_std=input_std,
-        use_structure_adapter=guidance_cfg.get("use_structure_adapter", False),
-        enable_cocoop=getattr(cfg.model, "enable_cocoop", False),
-        cocoop_n_ctx=getattr(cfg.model, "cocoop_n_ctx", 4),
-        cocoop_ctx_init=getattr(cfg.model, "cocoop_ctx_init", "a photo of a"),
-        cocoop_class_names=getattr(cfg.model, "cocoop_class_names", None),
+        text_prompts=getattr(cfg.model, "text_prompts", None),
+        n_ratio=cfg.model.n_ratio,
+        pretrained=False,
     )
 
     checkpoint = torch.load(checkpoint_path, map_location=device)

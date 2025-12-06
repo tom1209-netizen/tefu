@@ -11,17 +11,6 @@ model:
     num_prototypes_per_class: 1
     prototype_feature_dim: 512
 
-    # Minimal setting
-    enable_text_fusion: false
-    fusion_dim: 512
-    learnable_text_prompt: false
-    prompt_init_scale: 0.02
-    prototype_init_mode: text_learnable
-    prototype_text_noise_std: 0.02
-    use_ctx_prompt: false
-    ctx_prompt_len: 8
-    ctx_class_specific: false
-
     # SegFormer-guided structural distillation
     segformer_guidance:
         enable: true
@@ -30,10 +19,6 @@ model:
         layers: [2]
         train_clip_visual: false
         use_structure_adapter: true
-    enable_cocoop: false
-    cocoop_n_ctx: 8
-    cocoop_ctx_init: "Histopathology image showing"
-    cocoop_class_names: null
 
     # Text prompts for each class
     text_prompts:
@@ -48,7 +33,7 @@ clip:
     cache_dir: ./checkpoints/conch
     hf_hub: null
     hf_token: null
-    force_image_size: 448
+    force_image_size: 224
     proj_contrast: true
     freeze: true
 
@@ -68,7 +53,7 @@ work_dir:
 
 train:
     samples_per_gpu: 10
-    epoch: 5
+    epoch: 2
     warmup_iters: 0
     pretrained: true
 
@@ -82,7 +67,7 @@ train:
     l_proto_temp: 0.07
     lambda_j: 0.0
     l_fuse: 0.0
-    l_struct: 5.0
+    l_struct: 1.5
     diversity: {}
     memory_bank_size: 0
     mask_adapter_alpha: 0.5
@@ -91,7 +76,7 @@ train:
 
 optimizer:
     type: AdamW
-    learning_rate: 0.00005
+    learning_rate: 0.00002
     betas:
         - 0.9
         - 0.999

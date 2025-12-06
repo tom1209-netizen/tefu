@@ -114,47 +114,6 @@ class ConchAdapter(nn.Module):
                 token_ids.to(self.device), normalize=normalize)
         return text_latent
 
-    # CoCoOp helpers
-    def get_token_embedding(self):
-        """
-        Expose raw token embedding layer for building custom prompts.
-        """
-        return self.model.text.token_embedding
-
-    def encode_text_with_embeddings(self, embeddings: torch.Tensor, normalize: bool = True) -> torch.Tensor:
-        """
-        Encode text when token embeddings are preassembled. Gradients are not
-        propagated into the CONCH text encoder.
-        """
-        text_module = self.model.text
-        device = embeddings.device
-        with torch.no_grad():
-            x = embeddings
-            pos_emb = text_module.positional_embedding
-            pe = pos_emb
-            if pe.shape[0] < x.shape[1]:
-                pe = F.interpolate(
-                    pe.unsqueeze(0).permute(0, 2, 1),
-                    size=x.shape[1],
-                    mode="linear",
-                    align_corners=False,
-                ).permute(0, 2, 1).squeeze(0)
-            x = x + pe[: x.shape[1], :].to(device)
-
-            x = x.permute(1, 0, 2)  # NLD -> LND
-            x = text_module.transformer(x)
-            x = x.permute(1, 0, 2)  # LND -> NLD
-
-            x = text_module.ln_final(x)
-
-            x = x[:, -1, :]
-
-            x = x @ text_module.text_projection
-
-            if normalize:
-                x = F.normalize(x, dim=-1)
-        return x
-
     # Update this method signature
     def encode_image(self, images: torch.Tensor, normalize: bool = True, proj_contrast: Optional[bool] = None) -> torch.Tensor:
         """

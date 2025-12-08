@@ -2,8 +2,11 @@ CONFIG ?= work_dirs/bcss/classification/config.yaml
 GPU ?= 0
 LOG_DIR ?= logs
 CHECKPOINT ?= work_dirs/bcss/classification/checkpoints/2025-11-24-07-07/best_cam.pth
+CHECKPOINT_DISTILLED ?= $(CHECKPOINT)
+CHECKPOINT_BASELINE ?=
 SPLIT ?= test
 OUT_DIR ?= outputs
+ANALYSIS_OUT ?= figures/analysis
 IMAGES ?= TCGA-D8-A27F-DX1_xmin98787_ymin6725_MPP-0.2500+1.png
 
 .PHONY: train
@@ -34,6 +37,13 @@ proto:
 	OUT_ARG=""; \
 	if [ -n "$(OUT_DIR)" ]; then OUT_ARG="--out-dir $(OUT_DIR)"; fi; \
 	python visualization_utils/visualize_prototypes.py --config $(CONFIG) --checkpoint $(CHECKPOINT) --gpu $(GPU) --split $(SPLIT) --images $(IMAGES) $$OUT_ARG
+
+.PHONY: structure
+structure:
+	@if [ -z "$(CHECKPOINT_DISTILLED)" ]; then echo "CHECKPOINT_DISTILLED is required"; exit 1; fi; \
+	BASELINE_ARG=""; \
+	if [ -n "$(CHECKPOINT_BASELINE)" ]; then BASELINE_ARG="--checkpoint-baseline $(CHECKPOINT_BASELINE)"; fi; \
+	python visualization_utils/structure_analysis.py --config $(CONFIG) --checkpoint-distilled $(CHECKPOINT_DISTILLED) $$BASELINE_ARG --gpu $(GPU) --split $(SPLIT) --output-dir $(ANALYSIS_OUT)
 
 
 .PHONY: clean
@@ -77,6 +87,13 @@ help:
 	@echo "                  Variables:"
 	@echo "                    IMAGES   : (Required) Space-separated filenames"
 	@echo "                    CONFIG, CHECKPOINT, GPU, SPLIT, OUT_DIR"
+	@echo ""
+	@echo "  structure       Run layer-similarity + ERF analysis (baseline vs distilled)."
+	@echo "                  Runs visualization_utils/structure_analysis.py."
+	@echo "                  Variables:"
+	@echo "                    CHECKPOINT_DISTILLED : Distilled checkpoint (required, default: $(CHECKPOINT_DISTILLED))"
+	@echo "                    CHECKPOINT_BASELINE  : Optional baseline checkpoint (empty to skip)"
+	@echo "                    CONFIG, GPU, SPLIT, ANALYSIS_OUT"
 	@echo ""
 	@echo "  clean           Remove all files in LOG_DIR and OUT_DIR."
 	@echo "  help            Show this help message."

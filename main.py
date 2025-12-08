@@ -220,14 +220,14 @@ def train(cfg, args):
         device) if lambda_contrast > 0 else None
     bg_loss_fn = InfoNCELossBG(temperature=0.07).to(
         device) if lambda_contrast > 0 else None
-    
+
     feature_extractor = None
     memory_bank = None
     if lambda_contrast > 0:
 
         mask_adapter = MaskAdapter_DynamicThreshold(
             alpha=cfg.train.mask_adapter_alpha)
-        
+
         feature_extractor = FeatureExtractor(
             mask_adapter=mask_adapter,
             clip_adapter=clip_model,

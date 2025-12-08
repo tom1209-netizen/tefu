@@ -1,9 +1,9 @@
 CONFIG ?= work_dirs/bcss/classification/config.yaml
 GPU ?= 0
 LOG_DIR ?= logs
-CHECKPOINT ?= work_dirs/bcss/classification/checkpoints/2025-11-24-07-07/best_cam.pth
+CHECKPOINT ?= work_dirs/bcss/classification/checkpoints/2025-12-06-19-55/best_cam.pth
 CHECKPOINT_DISTILLED ?= $(CHECKPOINT)
-CHECKPOINT_BASELINE ?=
+CHECKPOINT_BASELINE ?= checkpoints/conch/pytorch_model.bin
 SPLIT ?= test
 OUT_DIR ?= outputs
 ANALYSIS_OUT ?= figures/analysis

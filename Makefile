@@ -8,6 +8,8 @@ SPLIT ?= test
 OUT_DIR ?= outputs
 ANALYSIS_OUT ?= figures/analysis
 IMAGES ?= TCGA-D8-A27F-DX1_xmin98787_ymin6725_MPP-0.2500+1.png
+MAPS_OUT ?= figures/maps
+NUM_IMAGES ?= 5
 
 .PHONY: train
 train:
@@ -45,6 +47,14 @@ structure:
 	if [ -n "$(CHECKPOINT_BASELINE)" ]; then BASELINE_ARG="--checkpoint-baseline $(CHECKPOINT_BASELINE)"; fi; \
 	python visualization_utils/structure_analysis.py --config $(CONFIG) --checkpoint-distilled $(CHECKPOINT_DISTILLED) $$BASELINE_ARG --gpu $(GPU) --split $(SPLIT) --output-dir $(ANALYSIS_OUT)
 
+.PHONY: maps
+maps:
+	@echo "Running Feature Map Visualization (Raw vs Distilled vs SegFormer)..."
+	python visualize_maps.py --config $(CONFIG) \
+		--checkpoint $(CHECKPOINT) \
+		--gpu $(GPU) \
+		--output-dir $(MAPS_OUT) \
+		--num-images $(NUM_IMAGES)
 
 .PHONY: clean
 clean:
@@ -94,6 +104,13 @@ help:
 	@echo "                    CHECKPOINT_DISTILLED : Distilled checkpoint (required, default: $(CHECKPOINT_DISTILLED))"
 	@echo "                    CHECKPOINT_BASELINE  : Optional baseline checkpoint (empty to skip)"
 	@echo "                    CONFIG, GPU, SPLIT, ANALYSIS_OUT"
+	@echo ""
+	@echo "  maps            Visualize feature maps (Raw vs Refined vs Teacher)."
+	@echo "                  Runs visualize_maps.py."
+	@echo "                  Variables:"
+	@echo "                    CONFIG, CHECKPOINT, GPU"
+	@echo "                    MAPS_OUT : Output directory (default: $(MAPS_OUT))"
+	@echo "                    NUM_IMAGES: Number of images to visualize (default: $(NUM_IMAGES))"
 	@echo ""
 	@echo "  clean           Remove all files in LOG_DIR and OUT_DIR."
 	@echo "  help            Show this help message."

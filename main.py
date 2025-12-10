@@ -1,6 +1,3 @@
-# Implementation adapted from PBIP by Qingchen Tang
-# Source: https://github.com/QingchenTang/PBIP
-
 import argparse
 import datetime
 import os

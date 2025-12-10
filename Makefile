@@ -66,7 +66,7 @@ clean:
 .PHONY: help
 help:
 	@echo "======================================================================"
-	@echo "                        TEFU Project Makefile                         "
+	@echo "                        ConStruct Project Makefile                         "
 	@echo "======================================================================"
 	@echo "Usage: make <target> [VARIABLE=value]"
 	@echo ""

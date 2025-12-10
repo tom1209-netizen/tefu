@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=tefu_with_div
-#SBATCH --output=logs/tefu_with_div.out
-#SBATCH --error=logs/tefu_with_div.err
+#SBATCH --job-name=construct
+#SBATCH --output=logs/construct.out
+#SBATCH --error=logs/construct.err
 #SBATCH --time=48:00:00
 #SBATCH --gres=gpu:1
 #SBATCH --mem=32G
@@ -15,4 +15,4 @@ if [ -n "${CONDA_DEFAULT_ENV:-}" ]; then
   conda deactivate || true
 fi
 
-make train
+python train

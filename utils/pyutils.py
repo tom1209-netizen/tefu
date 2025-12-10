@@ -1,5 +1,4 @@
-# Implementation adapted from PBIP by Qingchen Tang
-# Source: https://github.com/QingchenTang/PBIP
+# Implementation for ConStruct
 
 import argparse
 import torch
